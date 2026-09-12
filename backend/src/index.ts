@@ -25,8 +25,12 @@ import {
 	searchQuerySchema,
 	suggestQuerySchema,
 } from './scheme';
+import { publicRoutes } from './public';
+import { purgeSyncedPerformances, streamers } from './streamers';
+import type { Session } from './session';
+import type { SheetsEnv } from './sheets';
 
-export type Bindings = {
+export type Bindings = SheetsEnv & {
 	TURSO_DATABASE_URL: string;
 	TURSO_AUTH_TOKEN: string;
 	// hotインデックスのスナップショット置き場
@@ -35,6 +39,7 @@ export type Bindings = {
 
 export type Variables = {
 	db: Client;
+	session: Session;
 };
 
 const db = (env: Bindings): Client =>
@@ -372,12 +377,25 @@ function toSong(r: Record<string, string | number>): Song {
 	};
 }
 
+app.route('/', streamers);
+
+// 視聴者向け(認証なし)
+app.route('/', publicRoutes);
+
 export { MAX_WINDOW };
 
 export default {
 	fetch: app.fetch,
 	scheduled: (_event: unknown, env: Bindings, ctx: ExecutionContext) => {
 		ctx.waitUntil(rebuildSnapshot(env));
+		ctx.waitUntil(
+			purgeSyncedPerformances(
+				createClient({
+					url: env.TURSO_DATABASE_URL,
+					authToken: env.TURSO_AUTH_TOKEN,
+				}),
+			).then(() => undefined),
+		);
 	},
 };
 
