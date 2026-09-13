@@ -125,7 +125,7 @@ export async function probeAccess(
 	const r = (await api(
 		env,
 		`/${encodeURIComponent(spreadsheetId)}` +
-			`?fieldss=properties.title,properties.timeZone,sheets.properties.title`,
+			`?fields=properties.title,properties.timeZone,sheets.properties.title`,
 	)) as {
 		properties: { title: string; timeZone?: string };
 		sheets: { properties: { title: string } }[];
@@ -188,6 +188,13 @@ export async function ensureSheets(
 	return missing.map((s) => s.title);
 }
 
+// USER_ENTERED: 人が打ったのと同じ扱い。"+2"や、"=LOVE"は数式として扱われる
+// RAW: そのまま文字列として扱われる。"+2"や、"=LOVE"は文字列として扱われる
+export type ValueInput = 'USER_ENTERED' | 'RAW';
+export function escapeSheetText(v: string): string {
+	return /^[=+\-@]/.test(v) ? `'${v}` : v;
+}
+
 // 末尾に行を追加する
 export async function appendRows(
 	env: SheetsEnv,
@@ -195,12 +202,13 @@ export async function appendRows(
 	sheetTitle: string,
 	columns: string,
 	rows: (string | number)[][],
+	valueInput: ValueInput = 'USER_ENTERED',
 ): Promise<void> {
 	const range = encodeURIComponent(`${quoteSheet(sheetTitle)}!${columns}`);
 	await api(
 		env,
 		`/${encodeURIComponent(spreadsheetId)}/values/${range}:append` +
-			`?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+			`?valueInputOption=${valueInput}&insertDataOption=INSERT_ROWS`,
 		{ method: 'POST', body: JSON.stringify({ values: rows }) },
 	);
 }

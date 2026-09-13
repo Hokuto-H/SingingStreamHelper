@@ -12,12 +12,7 @@ import {
 	searchHot,
 	type Snapshot,
 } from './hotIndex';
-import {
-	MAX_WINDOW,
-	type BuiltQuery,
-	buildSearchQuery,
-	cacheKeyOf,
-} from './search';
+import { type BuiltQuery, buildSearchQuery, cacheKeyOf } from './search';
 import {
 	type Song,
 	createQuerySchema,
@@ -381,8 +376,6 @@ app.route('/', streamers);
 
 // 視聴者向け(認証なし)
 app.route('/', publicRoutes);
-
-export { MAX_WINDOW };
 
 export default {
 	fetch: app.fetch,

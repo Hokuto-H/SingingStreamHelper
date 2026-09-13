@@ -30,6 +30,7 @@ import {
 	formatSheetDateTime,
 	probeAccess,
 	quoteSheet,
+	escapeSheetText,
 	readRange,
 	updateRange,
 	type SheetSpec,
@@ -94,6 +95,19 @@ function sheetSpecs(repertoire: string, history: string): SheetSpec[] {
 	];
 }
 
+// RepertoireのJ1/K1に数式を書き直す
+async function writeRepertoireFormulas(
+	env: SheetsEnv,
+	spreadsheetId: string,
+	repertoireSheet: string,
+	historySheet: string,
+): Promise<void> {
+	const f = repertoireFormulas(historySheet);
+	await updateRange(env, spreadsheetId, `${quoteSheet(repertoireSheet)}!J1`, [
+		[f.singCount, f.lastSungAt],
+	]);
+}
+
 const RECOVERY_CELL = 'A1';
 const RECOVERY_TTL_MS = 15 * 60 * 1000;
 
@@ -148,7 +162,7 @@ export async function requireFullScope(
 
 // POST /streamer 登録
 streamers.post(
-	'/streamer',
+	'/streamers',
 	zValidator('json', registerStreamerSchema),
 	async (c) => {
 		const input = c.req.valid('json');
@@ -235,7 +249,7 @@ streamers.post(
 					],
 				},
 				{
-					sql: `INSERT INTO streamer_tokens (token_has, streamer_id, scope, label, created_at) VALUES (?, ?, 'full', ?, ?)`,
+					sql: `INSERT INTO streamer_tokens (token_hash, streamer_id, scope, label, created_at) VALUES (?, ?, 'full', ?, ?)`,
 					args: [tokenHash, id, '初回登録', now],
 				},
 			],
@@ -347,6 +361,18 @@ streamers.patch(
 				s.spreadsheetId,
 				sheetSpecs(repertoire, history),
 			);
+			// Hisstoryタブの名前の変更とともにRepertoireの数式を修正する
+			if (
+				input.historySheet !== undefined &&
+				input.historySheet !== s.historySheet
+			) {
+				await writeRepertoireFormulas(
+					c.env,
+					s.spreadsheetId,
+					repertoire,
+					history,
+				);
+			}
 		}
 
 		const sets: string[] = ['updated_at = ?'];
@@ -394,7 +420,7 @@ streamers.patch(
 // GET /me/tokens
 streamers.get('/me/tokens', requireStreamer, requireFullScope, async (c) => {
 	const rs = await c.get('db').execute({
-		sql: `SELECT token_has, scope, label, created_at, last_used_at, revoked_at FROM streamer_tokens WHERE streamer_id = ? ORDER BY created_at DESC`,
+		sql: `SELECT token_hash, scope, label, created_at, last_used_at, revoked_at FROM streamer_tokens WHERE streamer_id = ? ORDER BY created_at DESC`,
 		args: [c.get('session').streamerId],
 	});
 	const current = c.get('session').tokenHash;
@@ -579,7 +605,7 @@ streamers.post(
 		await db.batch(
 			[
 				{
-					sql: `INSERT INTO streamer_tokens (token_has, streamer_id, scope, label, created_at) VALUES (?, ?, 'full', ?, ?)`,
+					sql: `INSERT INTO streamer_tokens (token_hash, streamer_id, scope, label, created_at) VALUES (?, ?, 'full', ?, ?)`,
 					args: [hash, row.id, input.label ?? '復旧', now],
 				},
 				{
@@ -644,7 +670,7 @@ streamers.post(
 		}));
 		const results = await db.batch(
 			prepared.map((p) => ({
-				sql: `INSERT INTO performances (id, streamer_id, song_id, sung_at, stream_key, stream_url, timestamp_sec, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (streamer_id, client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id`,
+				sql: `INSERT INTO performances (id, streamer_id, song_id, sung_at, stream_url, timestamp_sec, client_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (streamer_id, client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id`,
 				args: [
 					p.id,
 					s.streamerId,
@@ -674,10 +700,10 @@ streamers.post(
 					s.historySheet,
 					HISTORY_WRITE_RANGE,
 					accepted.map((p) => [
-						p.songId,
+						escapeSheetText(p.songId),
 						formatSheetDateTime(p.sungAtMs, s.timezone),
-						songs.get(p.songId)!,
-						p.streamUrl ?? '',
+						escapeSheetText(songs.get(p.songId)!),
+						escapeSheetText(p.streamUrl ?? ''),
 						p.timestampSec ?? '',
 					]),
 				);
@@ -699,7 +725,7 @@ streamers.post(
 					sungAt: new Date(p.sungAtMs).toISOString(),
 					clientId: p.clientId ?? null,
 				})),
-				skipped: duplicated.map((p) => ({
+				duplicated: duplicated.map((p) => ({
 					songId: p.songId,
 					clientId: p.clientId ?? null,
 					reason: '同じ clientId で受付済みです(再送とみなしました)',
@@ -853,6 +879,7 @@ streamers.post(
 					i.tags,
 					i.notes,
 				]),
+				'RAW',
 			);
 		}
 
@@ -870,6 +897,34 @@ streamers.post(
 );
 
 // 公開設定
+
+// RepertoireのJ1/K1を今の定義で書き直す
+// POST /me/sheets/repair
+streamers.post(
+	'/me/sheets/repair',
+	requireStreamer,
+	requireFullScope,
+	async (c) => {
+		const s = c.get('session');
+		await ensureSheets(
+			c.env,
+			s.spreadsheetId,
+			sheetSpecs(s.repertoireSheet, s.historySheet),
+		);
+		await writeRepertoireFormulas(
+			c.env,
+			s.spreadsheetId,
+			s.repertoireSheet,
+			s.historySheet,
+		);
+		return c.json({
+			repaired: [`${s.repertoireSheet}!J1:K1`],
+			historySheet: s.historySheet,
+			message: '累計回数と最終歌唱日の数式を貼り直しました。',
+		});
+	},
+);
+
 // GET /me/public-fields
 streamers.get('/me/public-fields', requireStreamer, async (c) => {
 	const s = c.get('session');
@@ -969,10 +1024,10 @@ streamers.post('/me/resync', requireStreamer, async (c) => {
 		s.historySheet,
 		HISTORY_WRITE_RANGE,
 		rows.map((r) => [
-			String(r.song_id),
+			escapeSheetText(String(r.song_id)),
 			formatSheetDateTime(Number(r.sung_at), s.timezone),
-			String(r.title ?? ''),
-			String(r.stream_url ?? ''),
+			escapeSheetText(String(r.title ?? '')),
+			escapeSheetText(String(r.stream_url ?? '')),
 			r.timestamp_sec == null ? '' : Number(r.timestamp_sec),
 		]),
 	);
@@ -988,7 +1043,7 @@ function toStreamer(s: Session): Streamer {
 	return {
 		id: s.streamerId,
 		spreadsheetId: s.spreadsheetId,
-		spreadsheetUrl: `https://docs.google/com/spreadsheets/d/${s.spreadsheetId}/edit`,
+		spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${s.spreadsheetId}/edit`,
 		spreadsheetTitle: s.spreadsheetTitle,
 		repertoireSheet: s.repertoireSheet || REPERTOIRE_SHEET,
 		historySheet: s.historySheet || HISTORY_SHEET,

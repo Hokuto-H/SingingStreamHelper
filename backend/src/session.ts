@@ -95,7 +95,7 @@ SELECT
     t.last_used_at
 FROM streamer_tokens t
 JOIN streamers s ON s.id = t.streamer_id
-WHERE t.token_has = ? AND t.revoked_at IS NULL`;
+WHERE t.token_hash = ? AND t.revoked_at IS NULL`;
 
 export interface ResolveOptions {
 	waitUntil?: (p: Promise<unknown>) => void;
