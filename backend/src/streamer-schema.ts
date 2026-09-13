@@ -124,11 +124,13 @@ export function repertoireFormulas(historySheet: string): {
 	const h = `'${historySheet.replace(/'/g, "''")}'`;
 	return {
 		singCount:
-			`=ARRAYFORMULA(IF(ORW($A:$A)=!,"累計回数",` +
+			`=ARRAYFORMULA(IF(ROW($A:$A)=1,"累計回数",` +
 			`IF($A:$A="","",COUNTIF(${h}!$A:$A,$A:$A))))`,
 		lastSungAt:
 			`=ARRAYFORMULA(IF(ROW($A:$A)=1,"最終歌唱日",` +
-			`IF($A:$A="","",IFERROR(VLOOKUP($A:$A,SORT(${h}!$A:$B,2,FALSE),2,FALSE),""))))`,
+			`IF($A:$A="","",IFERROR(` +
+			`TEXT(VLOOKUP($A:$A,SORT(${h}!$A:$B,2,FALSE),2,FALSE),"yyyy-mm-dd hh:mm")` +
+			`,""))))`,
 	};
 }
 

@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS streamers (
     repertoire_sheet    TEXT    NOT NULL DEFAULT 'Repertoire',                  -- レパートリーのシート名
     history_sheet       TEXT    NOT NULL DEFAULT 'History',                     -- 歌唱履歴のシート名
     timezone            TEXT    NOT NULL DEFAULT 'Asia/Tokyo',                  -- タイムゾーン
-    spreadsheet_title   TEXT    NOT NULL,                                       -- スプレッドシートのタイトル
+    spreadsheet_title   TEXT,                                                  -- スプレッドシートのタイトル
     title_synced_at     INTEGER,                                                -- タイトルの同期日時
     display_name        TEXT,                                                   -- 表示名
     is_public           INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0, 1)), -- 公開かどうか
@@ -22,7 +22,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_streamers_spreadsheet ON streamers (spreads
 CREATE TABLE IF NOT EXISTS streamer_tokens (
     token_hash      TEXT    NOT NULL PRIMARY KEY, -- SHA256ハッシュ
     streamer_id     TEXT    NOT NULL REFERENCES streamers(id) ON DELETE CASCADE,
-    scope           TEXT    NOT NULL DEFAULT 'full' CHECK (scope IN ('full', 'dock')) -- "full" or "dock"
+    scope           TEXT    NOT NULL DEFAULT 'full' CHECK (scope IN ('full', 'dock')), -- "full" or "dock"
     label           TEXT,
     created_at      INTEGER NOT NULL,
     last_used_at    INTEGER,
@@ -50,7 +50,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_performances_client ON performances (stream
 CREATE INDEX IF NOT EXISTS idx_performances_purge ON performances (synced_at) WHERE synced_at IS NOT NULL;
 
 -- トークン紛失時の復旧
-CREATE TABLE IF NOT EXISTS recovery_challenge (
+CREATE TABLE IF NOT EXISTS recovery_challenges (
     spreadsheet_id TEXT    NOT NULL PRIMARY KEY,
     code           TEXT    NOT NULL,
     expires_at     INTEGER NOT NULL,

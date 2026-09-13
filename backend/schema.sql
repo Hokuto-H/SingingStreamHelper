@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS songs (
 ) STRICT;
 
 -- 並び順
--- LIMITに達した辞典で打ち切れる
+-- LIMITに達した時点で打ち切れる
 CREATE INDEX IF NOT EXISTS idx_songs_reading
     ON songs (reading_key, id, title, reading_title, artist, created_at, artist_key);
 
