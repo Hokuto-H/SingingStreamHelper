@@ -316,6 +316,115 @@ await call("PUT", "/me/public-fields", { token, body: { "repertoire.key": true }
 await call("PATCH", "/me", { token, body: { isPublic: false } });
 console.log("\n(後片付け: 非公開に戻し、キー設定の公開を元に戻しました)");
 
+// =====================================================================
+// 第 5 段: OBS ドックのペアリング
+// =====================================================================
+//
+// ここで確かめたいのは「繋がるか」より**「他人に渡らないか」**。
+//
+//   ① handle …… 誰がトークンを**受け取れる**か
+//                 配信画面に映った code を見ただけの第三者は受け取り側になれない
+//   ② pin ……… 誰のトークンが**流し込まれる**か
+//                 code を打った他人がいても、配信者の手元のドックに
+//                 その人の pin は入力されない
+//
+// 片方だけでは守れない。両方が効いていることを 1 本ずつ見る。
+// (Durable Object を使うので、ローカルでも wrangler dev が
+//  miniflare の DO を立ち上げる。追加の準備は要らない。)
+
+section("5. OBS ドックのペアリング");
+
+r = await call("POST", "/pair/start");
+check("POST /pair/start (認証なし) が 201", r.status === 201, short(r.body));
+if (r.status === 500) {
+  console.log(
+    "       → wrangler.jsonc の durable_objects / migrations が" +
+      "\n         抜けていないか確かめてください (npm run doctor が見ます)。",
+  );
+}
+const pairCode = r.body?.code;
+const pairHandle = r.body?.handle;
+check("code は XXXX-XXXX の 8 文字", /^[0-9A-Z]{4}-[0-9A-Z]{4}$/.test(pairCode ?? ""), pairCode);
+check("handle が返る (★画面には出さない値)",
+  typeof pairHandle === "string" && pairHandle.length >= 40,
+  pairHandle ? `${pairHandle.length} 文字` : "なし");
+
+// ── claim にはログインが要る ──────────────────────────
+r = await call("POST", "/pair/claim", { body: { code: pairCode } });
+check("トークン無しの claim は 401", r.status === 401, `status=${r.status}`);
+
+// ドック用トークンで claim できてしまうと、ドック 1 枚から
+// 何枚でもドックトークンを生やせてしまう
+const dockOnly = await call("POST", "/me/tokens", {
+  token,
+  body: { scope: "dock", label: `smoke-dock-${stamp}` },
+});
+r = await call("POST", "/pair/claim", {
+  token: dockOnly.body?.token,
+  body: { code: pairCode },
+});
+check("★dock トークンでの claim は 403 (増殖できない)", r.status === 403, `status=${r.status}`);
+
+// ── 正しい流れ ─────────────────────────────────────
+r = await call("POST", "/pair/claim", { token, body: { code: pairCode } });
+check("配信者 (full) の claim が 200", r.status === 200, short(r.body));
+const pairPin = r.body?.pin;
+check("確認番号は 3 桁", /^\d{3}$/.test(pairPin ?? ""), pairPin);
+
+// ── ①handle の向き ────────────────────────────────
+r = await call("POST", "/pair/confirm", {
+  body: { code: pairCode, handle: "A".repeat(43), pin: pairPin },
+});
+check("★code と pin を知っていても handle が違えば 403", r.status === 403, `status=${r.status}`);
+
+// ── ②pin の向き ───────────────────────────────────
+const wrongPin = String((Number(pairPin) + 1) % 1000).padStart(3, "0");
+r = await call("POST", "/pair/confirm", {
+  body: { code: pairCode, handle: pairHandle, pin: wrongPin },
+});
+check("★handle を持っていても pin が違えば 403", r.status === 403, `status=${r.status}`);
+check("残り回数が返る", r.body?.remaining === 2, short(r.body));
+
+// ── 大文字小文字とハイフンの揺れ ──────────────────────
+r = await call("POST", "/pair/status", {
+  body: { code: pairCode.replace("-", "").toLowerCase(), handle: pairHandle },
+});
+check("小文字・ハイフン無しでも同じコードとして届く", r.status === 200, short(r.body));
+check("status は件数と期限だけ (誰かは返さない)",
+  r.body?.claims === 1 && !short(r.body).includes("streamerId") && !short(r.body).includes("pin"),
+  short(r.body));
+
+// ── 成功 ───────────────────────────────────────────
+r = await call("POST", "/pair/confirm", {
+  body: { code: pairCode, handle: pairHandle, pin: pairPin },
+});
+check("正しい handle + pin で 201", r.status === 201, short(r.body));
+const pairedToken = r.body?.token;
+check("dock スコープで出る", r.body?.scope === "dock", r.body?.scope);
+
+r = await call("GET", "/me", { token: pairedToken });
+check("★出たトークンが配信者本人のものである",
+  r.status === 200 && r.body?.streamer?.id === streamerId,
+  `status=${r.status} id=…${String(r.body?.streamer?.id).slice(-8)} 期待=…${String(streamerId).slice(-8)}`);
+check("ドックなので設定変更はできない",
+  (await call("PATCH", "/me", { token: pairedToken, body: { displayName: "x" } })).status === 403);
+
+// ── 単回使用 ───────────────────────────────────────
+r = await call("POST", "/pair/confirm", {
+  body: { code: pairCode, handle: pairHandle, pin: pairPin },
+});
+check("★同じ code は二度使えない", r.status === 404, `status=${r.status}`);
+
+// ── 入力チェック ───────────────────────────────────
+r = await call("POST", "/pair/claim", { token, body: { code: "ABC" } });
+check("短すぎる code は 400", r.status === 400, `status=${r.status}`);
+r = await call("POST", "/pair/claim", { token, body: { code: "ZZZZ-ZZZZ" } });
+check("知らない code は 404", r.status === 404, `status=${r.status}`);
+
+// 後片付け: ペアリングで出たトークンと、上で作った dock トークンを失効させる
+await call("POST", "/me/tokens/revoke-docks", { token });
+console.log("\n(後片付け: ペアリングで発行したドック用トークンを失効させました)");
+
 finish();
 
 function finish() {

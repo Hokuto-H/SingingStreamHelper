@@ -42,6 +42,7 @@ import {
 	HISTORY_SHEET,
 	HISTORY_WRITE_RANGE,
 	PUBLIC_FIELD_DEFS,
+	HUMAN_CODE_ALPHABET,
 	SETTINGS_HEADER,
 	SETTINGS_SHEET,
 	REPERTOIRE_HEADER,
@@ -54,6 +55,7 @@ import {
 	issueTokenSchema,
 	listPerformancesSchema,
 	loginSchema,
+	normalizeHumanCode,
 	updateStreamerSchema,
 	recoverCompleteSchema,
 	recoverStartSchema,
@@ -589,8 +591,8 @@ streamers.post(
 			spreadsheetId,
 			`'${row.sheet_title}'!${RECOVERY_CELL}`,
 		);
-		const cell = (values[0]?.[0] ?? '').trim();
-		if (cell !== row.code) {
+		const cell = normalizeHumanCode(String(values[0]?.[0] ?? ''));
+		if (cell !== normalizeHumanCode(row.code)) {
 			return c.json(
 				{
 					error: 'code mismatch',
@@ -1090,8 +1092,9 @@ function serviceAccountEmail(env: SheetsEnv): string {
 
 // 人が手で写せる長さや紛らわしい文字を除いたコード
 function randomCode(): string {
-	const alphabet = 'ABCEDFGHJKLMNPQRSTUVWXYZ23456789'; // I, O, 0, 1を除く
 	const bytes = new Uint8Array(8);
 	crypto.getRandomValues(bytes);
-	return [...bytes].map((b) => alphabet[b % alphabet.length]).join('');
+	return [...bytes]
+		.map((b) => HUMAN_CODE_ALPHABET[b % HUMAN_CODE_ALPHABET.length])
+		.join('');
 }

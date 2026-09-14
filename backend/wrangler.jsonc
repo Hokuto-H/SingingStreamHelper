@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "backend",
   "main": "src/index.ts",
-  "compatibility_date": "2026-08-22"
+  "compatibility_date": "2026-08-22",
   // "compatibility_flags": [
   //   "nodejs_compat"
   // ],
@@ -35,4 +35,9 @@
   //   "enabled": true,
   //   "head_sampling_rate": 1
   // }
+  "durable_objects": {
+    "bindings": [{ "name": "PAIRING", "class_name": "PairingDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PairingDO"] }],
+  "triggers": { "crons": ["0 18 * * *"] }
 }

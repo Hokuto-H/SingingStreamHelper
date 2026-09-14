@@ -17,6 +17,7 @@
  * ファイルを手で写していて 1 ブロック抜けた、というときに一発で分かる。
  * ─────────────────────────────────────────────────────────
  */
+import { readFileSync } from "node:fs";
 import { createClient } from "@libsql/client";
 import { loadDevVars } from "./env.mjs";
 
@@ -68,6 +69,37 @@ if (!saRaw) {
     );
   }
 }
+// ── wrangler.jsonc 側の設定 ────────────────────────────────
+//
+// ★ ここが抜けていると env.PAIRING が undefined になり、
+//   /pair/start が「ルートはあるのに 500」という分かりにくい落ち方をする。
+//   設定ファイルなので doctor で見ておく価値がある。
+try {
+  const raw = readFileSync("wrangler.jsonc", "utf8")
+    .replace(/^﻿/, "")
+    .replace(/^\s*\/\/.*$/gm, ""); // 行コメントを落としてから JSON として読む
+  const wr = JSON.parse(raw);
+  const bindings = wr.durable_objects?.bindings ?? [];
+  line(
+    bindings.some((b) => b.name === "PAIRING" && b.class_name === "PairingDO"),
+    "wrangler.jsonc に PAIRING の Durable Object binding がある",
+    bindings.length ? bindings.map((b) => b.name).join(", ") : "★ durable_objects が無い",
+  );
+  const mig = wr.migrations ?? [];
+  const sqliteClasses = mig.flatMap((m) => m.new_sqlite_classes ?? []);
+  line(
+    sqliteClasses.includes("PairingDO"),
+    "migrations が new_sqlite_classes で PairingDO を作っている",
+    // ★ 無料プランは SQLite バックエンドの DO しか使えない。
+    //   new_classes と書いてあると本番デプロイでだけ落ちる。
+    mig.flatMap((m) => m.new_classes ?? []).includes("PairingDO")
+      ? "★ new_classes になっています。無料プランでは new_sqlite_classes が必要です"
+      : "",
+  );
+} catch (e) {
+  line(false, "wrangler.jsonc が読める", String(e?.message ?? e));
+}
+
 const sheet = process.env.SMOKE_SPREADSHEET ?? vars.SMOKE_SPREADSHEET ?? "";
 console.log(
   `  --  SMOKE_SPREADSHEET: ${sheet ? sheet.slice(0, 60) : "(未設定 → smoke は曲マスタだけ)"}`,
@@ -202,6 +234,15 @@ const ROUTES = [
   ["POST", "/me/resync"],
   ["GET", "/me/public-fields"],
   ["PUT", "/me/public-fields"],
+  // ★ OBS ドックのペアリング。
+  //   /pair/start だけは認証も入力も要らないので 201 が返る。
+  //   ここが 500 になるなら、まず疑うのは wrangler.jsonc の
+  //   durable_objects / migrations が抜けていること
+  //   (env.PAIRING が undefined → "Cannot read properties of undefined")。
+  ["POST", "/pair/start"],
+  ["POST", "/pair/claim"],
+  ["POST", "/pair/confirm"],
+  ["POST", "/pair/status"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000/repertoire"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000/history"],
