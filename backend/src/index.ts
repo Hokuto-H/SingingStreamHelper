@@ -20,6 +20,7 @@ import {
 	searchQuerySchema,
 	suggestQuerySchema,
 } from './scheme';
+import { pairing, PairingDO } from './pairing';
 import { publicRoutes } from './public';
 import { purgeSyncedPerformances, streamers } from './streamers';
 import type { Session } from './session';
@@ -30,6 +31,7 @@ export type Bindings = SheetsEnv & {
 	TURSO_AUTH_TOKEN: string;
 	// hotインデックスのスナップショット置き場
 	HOT?: KVNamespace;
+	PAIRING: DurableObjectNamespace;
 };
 
 export type Variables = {
@@ -376,6 +378,11 @@ app.route('/', streamers);
 
 // 視聴者向け(認証なし)
 app.route('/', publicRoutes);
+
+// OBSドックのペアリング
+app.route('/', pairing);
+
+export { PairingDO };
 
 export default {
 	fetch: app.fetch,

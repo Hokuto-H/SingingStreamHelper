@@ -170,6 +170,59 @@ export const recoverCompleteSchema = z.object({
 export const tokenScopeSchema = z.enum(['full', 'dock']);
 export type TokenScopeInput = z.infer<typeof tokenScopeSchema>;
 
+// POST /pair/* OBSドックのペアリングで使用
+export const HUMAN_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 0/I/O/1を除外
+export const PAIR_CODE_LENGTH = 8;
+// 人が打ったコードを保存されている形に揃える
+export function normalizeHumanCode(input: string): string {
+	return input.replace(/[\s\u3000-]/g, '').toUpperCase();
+}
+
+const pairCode = z
+	.string()
+	.trim()
+	.min(1)
+	.max(32)
+	.transform(normalizeHumanCode)
+	.refine(
+		(v) =>
+			v.length === PAIR_CODE_LENGTH &&
+			[...v].every((ch) => HUMAN_CODE_ALPHABET.includes(ch)),
+		{ message: '接続コードの形式が不正です。' },
+	);
+
+const pairHandle = z
+	.string()
+	.trim()
+	.min(20)
+	.max(100)
+	.regex(/^[A-Za-z0-9_-]+$/, 'handleの形式が不正です。');
+
+// ログイン済みのブラウザがCodeを打つ
+export const pairClaimSchema = z.object({
+	code: pairCode,
+});
+
+// ドックがhandleと配信者が発行したCodeを打つ
+export const pairConfirmSchema = z.object({
+	code: pairCode,
+	handle: pairHandle,
+	pin: z
+		.string()
+		.trim()
+		.regex(/^\d{3}$/, '確認番号は3桁の数字です。'),
+});
+
+// ドックが誰かが入力したかを確認する
+export const pairStatusSchema = z.object({
+	code: pairCode,
+	handle: pairHandle,
+});
+
+export type PairClaimInput = z.infer<typeof pairClaimSchema>;
+export type PairConfirmInput = z.infer<typeof pairConfirmSchema>;
+export type PairStatusInput = z.infer<typeof pairStatusSchema>;
+
 // POST /auth/session (ログインのようなもの) で使用
 
 export const loginSchema = z.object({
