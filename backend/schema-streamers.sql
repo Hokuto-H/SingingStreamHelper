@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS streamers (
     title_synced_at     INTEGER,                                                -- タイトルの同期日時
     display_name        TEXT,                                                   -- 表示名
     is_public           INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0, 1)), -- 公開かどうか
+    overlay_key         TEXT,
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
 ) STRICT;
@@ -16,6 +17,8 @@ CREATE TABLE IF NOT EXISTS streamers (
 -- 1つのスプレッドシートを2人の配信者に紐づけしない。
 -- 登録時のすでに紐づいているかどうかの判定もこのインデックスで済む
 CREATE UNIQUE INDEX IF NOT EXISTS uq_streamers_spreadsheet ON streamers (spreadsheet_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_streamers_overlay_key ON streamers (overlay_key);
 
 -- アクセストークン
 -- 平文は保存しない

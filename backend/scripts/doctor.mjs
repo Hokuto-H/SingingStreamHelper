@@ -80,25 +80,80 @@ try {
     .replace(/^\s*\/\/.*$/gm, ""); // 行コメントを落としてから JSON として読む
   const wr = JSON.parse(raw);
   const bindings = wr.durable_objects?.bindings ?? [];
-  line(
-    bindings.some((b) => b.name === "PAIRING" && b.class_name === "PairingDO"),
-    "wrangler.jsonc に PAIRING の Durable Object binding がある",
-    bindings.length ? bindings.map((b) => b.name).join(", ") : "★ durable_objects が無い",
-  );
   const mig = wr.migrations ?? [];
   const sqliteClasses = mig.flatMap((m) => m.new_sqlite_classes ?? []);
+  const legacyClasses = mig.flatMap((m) => m.new_classes ?? []);
+
+  for (const [name, cls] of [
+    ["PAIRING", "PairingDO"],
+    ["NOW_PLAYING", "NowPlayingDO"],
+  ]) {
+    line(
+      bindings.some((b) => b.name === name && b.class_name === cls),
+      `wrangler.jsonc に ${name} の Durable Object binding がある`,
+      bindings.length ? bindings.map((b) => b.name).join(", ") : "★ durable_objects が無い",
+    );
+    line(
+      sqliteClasses.includes(cls),
+      `migrations が new_sqlite_classes で ${cls} を作っている`,
+      // ★ 無料プランは SQLite バックエンドの DO しか使えない。
+      //   new_classes と書いてあると本番デプロイでだけ落ちる。
+      legacyClasses.includes(cls)
+        ? "★ new_classes になっています。無料プランでは new_sqlite_classes が必要です"
+        : "",
+    );
+  }
+  // ★ 一度デプロイした tag を書き換えると Cloudflare 側の状態と食い違う。
+  //   クラスを増やすときは tag を足すこと。
   line(
-    sqliteClasses.includes("PairingDO"),
-    "migrations が new_sqlite_classes で PairingDO を作っている",
-    // ★ 無料プランは SQLite バックエンドの DO しか使えない。
-    //   new_classes と書いてあると本番デプロイでだけ落ちる。
-    mig.flatMap((m) => m.new_classes ?? []).includes("PairingDO")
-      ? "★ new_classes になっています。無料プランでは new_sqlite_classes が必要です"
-      : "",
+    new Set(mig.map((m) => m.tag)).size === mig.length,
+    "migrations の tag が重複していない",
+    mig.map((m) => m.tag).join(", "),
   );
 } catch (e) {
   line(false, "wrangler.jsonc が読める", String(e?.message ?? e));
 }
+
+// ── CORS ──────────────────────────────────────────────────
+//
+// 未設定でも「同一オリジンのみ」で動くので NG にはしない。
+// ただし Pages から叩くときは必須なので、状態は見えるようにしておく。
+const originsRaw = process.env.ALLOWED_ORIGINS ?? vars.ALLOWED_ORIGINS ?? "";
+const origins = originsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+if (!origins.length) {
+  console.log(
+    "  --  ALLOWED_ORIGINS: (未設定 → 同一オリジンのみ)" +
+      "\n       ブラウザの別オリジン (Vite / Pages) から叩くなら設定が要ります。",
+  );
+} else {
+  console.log(`  --  ALLOWED_ORIGINS: ${origins.join(", ")}`);
+  for (const o of origins) {
+    // ★ よくある書き間違いを 3 つだけ見る。
+    //   どれも「CORS が通らない」という同じ症状になり、切り分けにくい。
+    if (o.endsWith("/")) {
+      line(false, `ALLOWED_ORIGINS の書式: ${o}`,
+        "★ 末尾のスラッシュを消してください (Origin ヘッダには付きません)");
+    } else if (!/^https?:\/\//.test(o)) {
+      line(false, `ALLOWED_ORIGINS の書式: ${o}`, "★ http:// か https:// から書いてください");
+    } else if (/^https?:\/\/\*\.[^.]+\.[^.]+$/.test(o)) {
+      // https://*.pages.dev のような広すぎる指定
+      line(false, `ALLOWED_ORIGINS の書式: ${o}`,
+        "★ ワイルドカードが広すぎます。プロジェクト名まで書いてください " +
+          "(https://*.<project>.pages.dev)");
+    } else {
+      line(true, `ALLOWED_ORIGINS の書式: ${o}`);
+    }
+  }
+}
+
+// ── レート制限 ────────────────────────────────────────────
+const rlOff = String(process.env.RATE_LIMIT_DISABLED ?? vars.RATE_LIMIT_DISABLED ?? "") === "1";
+console.log(
+  rlOff
+    ? "  --  RATE_LIMIT_DISABLED=1 (ローカル用。★本番の secret には入れないこと)"
+    : "  --  レート制限: 有効。smoke / doctor が 429 に当たるなら" +
+        "\n       .dev.vars に RATE_LIMIT_DISABLED=1 を足してください。",
+);
 
 const sheet = process.env.SMOKE_SPREADSHEET ?? vars.SMOKE_SPREADSHEET ?? "";
 console.log(
@@ -122,7 +177,7 @@ const WANT = {
   streamers: [
     "id", "spreadsheet_id", "repertoire_sheet", "history_sheet", "timezone",
     "spreadsheet_title", "title_synced_at", "display_name", "is_public",
-    "created_at", "updated_at",
+    "overlay_key", "created_at", "updated_at",
   ],
   streamer_tokens: [
     "token_hash", "streamer_id", "scope", "label",
@@ -184,6 +239,8 @@ if (!have("TURSO_DATABASE_URL") || !have("TURSO_AUTH_TOKEN")) {
         JOIN streamers s ON s.id = t.streamer_id
        WHERE t.token_hash = 'x' AND t.revoked_at IS NULL
        LIMIT 0`,
+    "オーバーレイ鍵 (streamerByOverlayKey)": `
+      SELECT id FROM streamers WHERE overlay_key = 'x' LIMIT 0`,
     "公開ページ (findPublicStreamer)": `
       SELECT id, display_name, spreadsheet_id, repertoire_sheet, history_sheet
         FROM streamers WHERE id = 'x' AND is_public = 1 LIMIT 0`,
@@ -214,6 +271,7 @@ console.log("  (認証や入力の不備で 4xx が返るのは正常。見て�
 
 /** [メソッド, パス, 期待する状態] */
 const ROUTES = [
+  ["GET", "/health"],
   ["GET", "/songs?title=%E3%81%82"],
   ["POST", "/songs"],
   ["GET", "/songs/suggest?title=%E3%81%82"],
@@ -243,6 +301,16 @@ const ROUTES = [
   ["POST", "/pair/claim"],
   ["POST", "/pair/confirm"],
   ["POST", "/pair/status"],
+  // 「今この曲」。/overlay/* は鍵だけで入る読み取り専用の口
+  ["POST", "/me/now-playing"],
+  ["GET", "/me/now-playing"],
+  ["DELETE", "/me/now-playing"],
+  ["GET", "/me/overlay"],
+  ["POST", "/me/overlay-key/rotate"],
+  ["GET", "/overlay/now-playing?key=nope"],
+  // OBS に貼る 2 枚の HTML。JSON ではないので下の判定を通さない
+  ["GET", "/dock"],
+  ["GET", "/overlay"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000/repertoire"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000/history"],
@@ -278,7 +346,10 @@ for (const [method, path] of ROUTES) {
   } catch {
     isJson = false;
   }
-  const missing = res.status === 404 && !isJson;
+  // ★ /dock と /overlay は HTML を返すので、JSON でないのが正しい。
+  //   「JSON じゃない = ルートが無い」の判定から外す。
+  const isHtmlRoute = path === "/dock" || path === "/overlay";
+  const missing = res.status === 404 && !isJson && !isHtmlRoute;
 
   let note = `→ ${res.status}`;
   if (missing) note = "★ ルートが登録されていません";
