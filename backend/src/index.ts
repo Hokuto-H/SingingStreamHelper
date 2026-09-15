@@ -20,18 +20,32 @@ import {
 	searchQuerySchema,
 	suggestQuerySchema,
 } from './scheme';
+import { nowPlaying, NowPlayingDO } from './now-playing';
+import { cors } from './cors';
+import { rateLimit } from './rate-limit';
+import { pages } from './pages';
 import { pairing, PairingDO } from './pairing';
 import { publicRoutes } from './public';
-import { purgeSyncedPerformances, streamers } from './streamers';
+import {
+	purgeSyncedPerformances,
+	requireFullScope,
+	requireStreamer,
+	streamers,
+} from './streamers';
 import type { Session } from './session';
 import type { SheetsEnv } from './sheets';
 
 export type Bindings = SheetsEnv & {
 	TURSO_DATABASE_URL: string;
 	TURSO_AUTH_TOKEN: string;
+	DEBUG_ERRORS?: string;
+	ALLOWED_ORIGINS?: string;
+	RATE_LIMIT_DISABLED?: string;
+	PUBLIC_API_ORIGIN?: string;
 	// hotインデックスのスナップショット置き場
 	HOT?: KVNamespace;
 	PAIRING: DurableObjectNamespace;
+	NOW_PLAYING: DurableObjectNamespace;
 };
 
 export type Variables = {
@@ -46,6 +60,17 @@ const db = (env: Bindings): Client =>
 	});
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+app.use('*', cors);
+app.use('*', rateLimit);
+
+app.use('*', async (c, next) => {
+	if (!c.get('db')) {
+		const client = db(c.env);
+		c.set('db', client);
+	}
+	await next();
+});
 
 const onInvalid: Hook<
 	unknown,
@@ -64,14 +89,6 @@ const onInvalid: Hook<
 
 	return c.json({ error: 'invalid request', issues }, 400);
 };
-
-app.use('*', async (c, next) => {
-	if (!c.get('db')) {
-		const client = db(c.env);
-		c.set('db', client);
-	}
-	await next();
-});
 
 app.onError((err, c) => {
 	console.error(`[Error ${c.req.method} ${c.req.url}]`, err);
@@ -101,6 +118,8 @@ app.onError((err, c) => {
 
 app.post(
 	'/songs',
+	requireStreamer,
+	requireFullScope,
 	zValidator('query', createQuerySchema, onInvalid),
 	zValidator('json', createSongsSchema, onInvalid),
 	async (c) => {
@@ -374,6 +393,31 @@ function toSong(r: Record<string, string | number>): Song {
 	};
 }
 
+// GET /health
+app.get('/health', (c) =>
+	c.json(
+		{
+			ok: true,
+			service: 'song-api',
+			time: new Date().toISOString(),
+		},
+		200,
+		{
+			'cache-control': 'no-store',
+		},
+	),
+);
+
+app.notFound((c) =>
+	c.json(
+		{
+			error: 'not found',
+			message: `${c.req.method} ${new URL(c.req.url).pathname} は存在しません。`,
+		},
+		404,
+	),
+);
+
 app.route('/', streamers);
 
 // 視聴者向け(認証なし)
@@ -382,7 +426,11 @@ app.route('/', publicRoutes);
 // OBSドックのペアリング
 app.route('/', pairing);
 
-export { PairingDO };
+app.route('/', nowPlaying);
+
+app.route('/', pages);
+
+export { PairingDO, NowPlayingDO };
 
 export default {
 	fetch: app.fetch,
