@@ -574,13 +574,98 @@ for (const path of ["/dock", "/overlay"]) {
 }
 
 // =====================================================================
-// 第 10 段: CORS (フロントを別オリジンに置くための下ごしらえ)
+// 第 10 段: セトリキュー
+// =====================================================================
+//
+// ★ 見たいのは 2 つ。
+//   1. **dock トークンで一通り操作できる**こと (OBS 内で完結するため)
+//   2. **rev による楽観的ロック**が効いていること
+//      手元が古いまま並び替えを送ると、その間に積まれた曲を黙って消す。
+//      配信中に起きて、しかも気づかない類の事故なので必ず固定しておく。
+
+section("10. セトリキュー");
+
+r = await call("GET", "/me/queue", { token: pairedToken });
+check("★dock トークンで GET /me/queue が通る", r.status === 200, short(r.body));
+
+// 後始末しやすいよう、smoke 用の曲だけを積む
+const qIds = [];
+for (const t of [`キュー1-${stamp}`, `キュー2-${stamp}`, `キュー3-${stamp}`]) {
+  r = await call("POST", "/me/queue", {
+    token: pairedToken,
+    body: { songId, title: t, artist: "テスト歌手", key: "+2" },
+  });
+  qIds.push(r.body?.item?.id);
+}
+check("★dock トークンで 3 曲積める", r.status === 201 && r.body?.items?.length >= 3,
+  `status=${r.status} items=${r.body?.items?.length}`);
+let qRev = r.body?.rev;
+
+// ── 並び替え ──────────────────────────────────────
+r = await call("PUT", "/me/queue", {
+  token: pairedToken,
+  body: { rev: qRev, ids: [qIds[2], qIds[0], qIds[1]] },
+});
+check("並び替えが通る", r.status === 200, `status=${r.status}`);
+check("指定した順になっている",
+  (r.body?.items ?? []).slice(0, 3).map((i) => i.title).join(",") ===
+    [`キュー3-${stamp}`, `キュー1-${stamp}`, `キュー2-${stamp}`].join(","),
+  (r.body?.items ?? []).map((i) => i.title).join(","));
+const staleRev = qRev;
+qRev = r.body?.rev;
+
+// ── ★ 楽観的ロック ────────────────────────────────
+r = await call("PUT", "/me/queue", {
+  token: pairedToken, body: { rev: staleRev, ids: [qIds[0]] },
+});
+check("★古い rev での並び替えは 409", r.status === 409, `status=${r.status}`);
+check("  現在の中身が返ってくる (描き直せる)", Array.isArray(r.body?.items),
+  `items=${r.body?.items?.length}`);
+
+r = await call("PUT", "/me/queue", {
+  token: pairedToken, body: { rev: qRev, ids: [qIds[0], "deadbeefdeadbeef"] },
+});
+check("★知らない id は 400 (黙って捨てない)", r.status === 400, short(r.body));
+
+// ── 歌う ─────────────────────────────────────────
+r = await call("POST", "/me/queue/next", { token: pairedToken });
+check("★先頭を歌える", r.status === 200 && r.body?.song?.title === `キュー3-${stamp}`,
+  short(r.body?.song));
+check("  記録用の songId が返る", r.body?.sung?.songId === songId, short(r.body?.sung));
+check("  キューから外れている",
+  !(r.body?.items ?? []).some((i) => i.id === qIds[2]),
+  (r.body?.items ?? []).map((i) => i.title).join(","));
+
+// ── 後片付け ─────────────────────────────────────
+r = await call("GET", "/me/queue", { token: pairedToken });
+for (const it of r.body?.items ?? []) {
+  await call("DELETE", `/me/queue/${it.id}`, { token: pairedToken });
+}
+r = await call("GET", "/me/queue", { token: pairedToken });
+check("空にできる", (r.body?.items ?? []).length === 0, `items=${r.body?.items?.length}`);
+r = await call("POST", "/me/queue/next", { token: pairedToken });
+check("空のキューで歌うと 409", r.status === 409, `status=${r.status}`);
+
+// ── レパートリー追加が dock で通るか ────────────────
+r = await call("POST", "/me/repertoire", {
+  token: pairedToken,
+  body: [{ songId, title: `テスト曲${stamp}`, artist: "テスト歌手", key: "+2" }],
+});
+check("★dock トークンで /me/repertoire が通る", r.status === 200 || r.status === 201,
+  `status=${r.status} ${short(r.body)}`);
+r = await call("POST", "/songs", {
+  token: pairedToken, body: [{ title: "x", readingTitle: "x", artist: "x" }],
+});
+check("★曲マスタは dock で叩けないまま (403)", r.status === 403, `status=${r.status}`);
+
+// =====================================================================
+// 第 11 段: CORS (フロントを別オリジンに置くための下ごしらえ)
 // =====================================================================
 //
 // ★ ここは .dev.vars に ALLOWED_ORIGINS がある場合だけ意味を持つ。
 //   未設定なら「同一オリジンのみ」という正しい状態なので、飛ばす。
 
-section("10. CORS");
+section("11. CORS");
 
 // ★ 環境変数だけでなく **.dev.vars も見る**こと。
 //   ALLOWED_ORIGINS は wrangler dev が .dev.vars から読む値なので、

@@ -837,7 +837,6 @@ streamers.get('/me/repertoire', requireStreamer, async (c) => {
 streamers.post(
 	'/me/repertoire',
 	requireStreamer,
-	requireFullScope,
 	zValidator('json', addRepertoireSchema),
 	async (c) => {
 		const s = c.get('session');

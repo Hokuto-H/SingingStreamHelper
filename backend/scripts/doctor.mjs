@@ -103,6 +103,20 @@ try {
         : "",
     );
   }
+  // ── KV (曲のサジェスト) ──────────────────────────
+  //
+  // ★ これが無いと GET /songs/suggest は**常に空を返す**。
+  //   エラーにならないので「検索が動かない」としか見えない。
+  const kv = wr.kv_namespaces ?? [];
+  line(
+    kv.some((k) => k.binding === "HOT" && k.id),
+    "wrangler.jsonc に HOT (KV) がある",
+    kv.length
+      ? kv.map((k) => k.binding).join(", ")
+      : "★ 未設定です。GET /songs/suggest は常に空を返します。" +
+        "\n       npx wrangler kv namespace create HOT  で作って id を貼ってください",
+  );
+
   // ★ 一度デプロイした tag を書き換えると Cloudflare 側の状態と食い違う。
   //   クラスを増やすときは tag を足すこと。
   line(
@@ -305,6 +319,11 @@ const ROUTES = [
   ["POST", "/me/now-playing"],
   ["GET", "/me/now-playing"],
   ["DELETE", "/me/now-playing"],
+  ["GET", "/me/queue"],
+  ["POST", "/me/queue"],
+  ["PUT", "/me/queue"],
+  ["DELETE", "/me/queue/deadbeef"],
+  ["POST", "/me/queue/next"],
   ["GET", "/me/overlay"],
   ["POST", "/me/overlay-key/rotate"],
   ["GET", "/overlay/now-playing?key=nope"],

@@ -233,6 +233,24 @@ export const nowPlayingInputSchema = z.object({
 
 export type NowPlayingInput = z.infer<typeof nowPlayingInputSchema>;
 
+// キューに積む曲
+export const queueItemInputSchema = z.object({
+	songId: z.string().trim().min(1).max(64).nullable().optional(),
+	title: z.string().trim().min(1).max(200),
+	artist: z.string().trim().max(200).nullable().optional(),
+	key: z.string().trim().max(20).nullable().optional(),
+	note: z.string().trim().max(200).nullable().optional(),
+});
+
+// 並び替え
+export const queueReorderSchema = z.object({
+	rev: z.number().int().min(0),
+	ids: z.array(z.string().trim().min(1).max(64)).max(300),
+});
+
+export type QueueItemInput = z.infer<typeof queueItemInputSchema>;
+export type QueueReorderInput = z.infer<typeof queueReorderSchema>;
+
 // POST /auth/session (ログインのようなもの) で使用
 
 export const loginSchema = z.object({
