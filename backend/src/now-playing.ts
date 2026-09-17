@@ -7,7 +7,11 @@ import type { Client } from '@libsql/client/web';
 import type { Session } from './session';
 import { requireStreamer, requireFullScope } from './streamers';
 import type { SheetsEnv } from './sheets';
-import { nowPlayingInputSchema } from './streamer-schema';
+import {
+	nowPlayingInputSchema,
+	queueItemInputSchema,
+	queueReorderSchema,
+} from './streamer-schema';
 
 export interface NowPlaying {
 	title: string;
@@ -18,11 +22,29 @@ export interface NowPlaying {
 }
 
 type OverlayMessage =
-	| { type: 'now-playing'; song: NowPlaying | null; serverTime: number }
+	| {
+			type: 'now-playing';
+			song: NowPlaying | null;
+			next: { title: string; artist: string | null } | null;
+			serverTime: number;
+	  }
 	| { type: 'pong'; serverTime: number };
+
+export interface QueueItem {
+	id: string;
+	songId: string | null;
+	title: string;
+	artist: string | null;
+	key: string | null;
+	note: string | null;
+	addedAt: number;
+}
 
 const STATE_KEY = 'state';
 const SEQ_KEY = 'seq';
+const QUEUE_KEY = 'queue';
+const QUEUE_REV_KEY = 'queueRev';
+const MAX_QUEUE = 300;
 
 const STALE_MS = 6 * 60 * 60 * 1000;
 
@@ -40,9 +62,15 @@ export class NowPlayingDO {
 		const url = new URL(request.url);
 		if (url.pathname === '/ws') return this.accept(request);
 
+		const body = (await request.json().catch(() => ({}))) as Record<
+			string,
+			unknown
+		>;
+
 		if (url.pathname === '/set') {
-			const song = (await request.json()) as Omit<NowPlaying, 'seq'>;
-			return json(await this.set(song));
+			return json(
+				await this.set(body as unknown as Omit<NowPlaying, 'seq'>),
+			);
 		}
 		if (url.pathname === '/clear') {
 			return json(await this.set(null));
@@ -50,7 +78,36 @@ export class NowPlayingDO {
 		if (url.pathname === '/get') {
 			return json({ song: await this.read(), serverTime: Date.now() });
 		}
-		return json({ error: 'not found' }, 404);
+		// セトリキュー
+		if (url.pathname === '/queue/get') {
+			return json(await this.queueView());
+		}
+		if (url.pathname === '/queue/add') {
+			return this.queueAdd(body as Omit<QueueItem, 'id' | 'addedAt'>);
+		}
+		if (url.pathname === '/queue/reorder') {
+			return this.queueReorder(
+				Number((body as { rev?: unknown }).rev),
+				((body as { ids?: unknown }).ids ?? []) as string[],
+			);
+		}
+		if (url.pathname === '/queue/remove') {
+			return this.queueRemove(
+				String((body as { id?: unknown }).id ?? ''),
+			);
+		}
+		if (url.pathname === '/queue/next') {
+			return this.queueNext();
+		}
+
+		return json(
+			{
+				error: 'unknown path',
+				path: url.pathname,
+				known: ['/ws', '/set', '/clear', '/get'],
+			},
+			404,
+		);
 	}
 
 	private async read(): Promise<NowPlaying | null> {
@@ -80,11 +137,7 @@ export class NowPlayingDO {
 		}
 		await this.state.storage.put(SEQ_KEY, seq);
 
-		const listeners = this.broadcast({
-			type: 'now-playing',
-			song: next,
-			serverTime: Date.now(),
-		});
+		const listeners = await this.broadcastState();
 		return { song: next, listeners };
 	}
 
@@ -101,10 +154,12 @@ export class NowPlayingDO {
 
 		// 接続時に現在の状態を送る
 		const song = await this.read();
+		const head = (await this.queue())[0];
 		server.send(
 			JSON.stringify({
 				type: 'now-playing',
 				song,
+				next: head ? { title: head.title, artist: head.artist } : null,
 				serverTime: Date.now(),
 			} satisfies OverlayMessage),
 		);
@@ -151,6 +206,16 @@ export class NowPlayingDO {
 		// 何もしない
 	}
 
+	private async broadcastState(queueOverride?: QueueItem[]): Promise<number> {
+		const head = (queueOverride ?? (await this.queue()))[0];
+		return this.broadcast({
+			type: 'now-playing',
+			song: await this.read(),
+			next: head ? { title: head.title, artist: head.artist } : null,
+			serverTime: Date.now(),
+		});
+	}
+
 	private broadcast(msg: OverlayMessage): number {
 		const body = JSON.stringify(msg);
 		let n = 0;
@@ -163,6 +228,107 @@ export class NowPlayingDO {
 			}
 		}
 		return n;
+	}
+
+	// セトリキュー
+	private async queue(): Promise<QueueItem[]> {
+		return (await this.state.storage.get<QueueItem[]>(QUEUE_KEY)) ?? [];
+	}
+
+	private async queueRev(): Promise<number> {
+		return (await this.state.storage.get<number>(QUEUE_REV_KEY)) ?? 0;
+	}
+
+	private async saveQueue(items: QueueItem[]): Promise<number> {
+		const rev = (await this.queueRev()) + 1;
+		await this.state.storage.put(QUEUE_KEY, items);
+		await this.state.storage.put(QUEUE_REV_KEY, rev);
+		await this.broadcastState(items);
+		return rev;
+	}
+
+	private async queueView(): Promise<{ items: QueueItem[]; rev: number }> {
+		return { items: await this.queue(), rev: await this.queueRev() };
+	}
+
+	private async queueAdd(
+		input: Omit<QueueItem, 'id' | 'addedAt'>,
+	): Promise<Response> {
+		const items = await this.queue();
+		if (items.length >= MAX_QUEUE) {
+			return json({ error: 'queue is full', limit: MAX_QUEUE }, 409);
+		}
+		const item: QueueItem = {
+			id: randomId(),
+			songId: input.songId ?? null,
+			title: String(input.title ?? ''),
+			artist: input.artist ?? null,
+			key: input.key ?? null,
+			note: input.note ?? null,
+			addedAt: Date.now(),
+		};
+		items.push(item);
+		const rev = await this.saveQueue(items);
+		return json({ item, items, rev });
+	}
+
+	private async queueReorder(rev: number, ids: string[]): Promise<Response> {
+		const current = await this.queueRev();
+		if (rev !== current) {
+			return json(
+				{ error: 'stale', rev: current, items: await this.queue() },
+				409,
+			);
+		}
+		const items = await this.queue();
+		const byId = new Map(items.map((i) => [i.id, i]));
+
+		const unknown = ids.filter((id) => !byId.has(id));
+		if (unknown.length) {
+			return json({ error: 'unknown ids', unknown }, 400);
+		}
+		const next = ids.map((id) => byId.get(id)!);
+		const newRev = await this.saveQueue(next);
+		return json({
+			items: next,
+			rev: newRev,
+			removed: items.length - next.length,
+		});
+	}
+
+	private async queueRemove(id: string): Promise<Response> {
+		const items = await this.queue();
+		const next = items.filter((i) => i.id !== id);
+		if (next.length === items.length)
+			return json({ error: 'not found' }, 404);
+		const rev = await this.saveQueue(next);
+		return json({ items: next, rev });
+	}
+
+	private async queueNext(): Promise<Response> {
+		const items = await this.queue();
+		const head = items[0];
+		if (!head) return json({ error: 'queue empty' }, 409);
+		const rest = items.slice(1);
+		await this.state.storage.put(QUEUE_KEY, rest);
+		await this.state.storage.put(
+			QUEUE_REV_KEY,
+			(await this.queueRev()) + 1,
+		);
+
+		const r = await this.set({
+			title: head.title,
+			artist: head.artist,
+			key: head.key,
+			startedAt: Date.now(),
+		});
+		return json({
+			sung: head,
+			song: r.song,
+			listeners: r.listeners,
+			items: rest,
+			rev: await this.queueRev(),
+		});
 	}
 
 	async alarm(): Promise<void> {
@@ -197,7 +363,8 @@ async function callDO(
 	streamerId: string,
 	path: string,
 	body?: unknown,
-): Promise<Record<string, unknown>> {
+	allow?: number[],
+): Promise<{ status: number; data: Record<string, unknown> }> {
 	const res = await doFor(env, streamerId).fetch(
 		new Request(`https://now-playing.internal${path}`, {
 			method: 'POST',
@@ -205,7 +372,14 @@ async function callDO(
 			body: JSON.stringify(body ?? {}),
 		}),
 	);
-	return (await res.json()) as Record<string, unknown>;
+	const data = (await res.json()) as Record<string, unknown>;
+	if (res.status !== 200 && !(allow ?? []).includes(res.status)) {
+		throw new Error(
+			`NowPlayingDO ${path} が ${res.status} を返しました: ${JSON.stringify(data)}` +
+				` - ルート側が送るパスと NowPlayingDO.fetch()の分岐が一致しているか確認してください。`,
+		);
+	}
+	return { status: res.status, data };
 }
 
 // 配信者側 (ドック)
@@ -223,20 +397,96 @@ nowPlaying.post(
 			key: input.key ?? null,
 			startedAt: input.startedAt ?? Date.now(),
 		});
-		return c.json({ song: r.song, listeners: r.listeners });
+		return c.json({ song: r.data.song, listeners: r.data.listeners });
 	},
 );
 
 // DELETE /me/now-playing
 nowPlaying.delete('/me/now-playing', requireStreamer, async (c) => {
 	const r = await callDO(c.env, c.get('session').streamerId, '/clear');
-	return c.json({ song: null, listeners: r.listeners });
+	return c.json({ song: null, listeners: r.data.listeners });
 });
 
 // GET /me/now-playing
 nowPlaying.get('/me/now-playing', requireStreamer, async (c) => {
 	const r = await callDO(c.env, c.get('session').streamerId, '/get');
-	return c.json(r);
+	return c.json(r.data);
+});
+
+// セトリキュー
+// GET /me/queue
+nowPlaying.get('/me/queue', requireStreamer, async (c) => {
+	return c.json(
+		(await callDO(c.env, c.get('session').streamerId, '/queue/get')).data,
+	);
+});
+
+// POST /me/queue
+nowPlaying.post(
+	'/me/queue',
+	requireStreamer,
+	zValidator('json', queueItemInputSchema),
+	async (c) => {
+		const i = c.req.valid('json');
+		const r = await callDO(
+			c.env,
+			c.get('session').streamerId,
+			'/queue/add',
+			{
+				songId: i.songId ?? null,
+				title: i.title,
+				artist: i.artist ?? null,
+				key: i.key ?? null,
+				note: i.note ?? null,
+			},
+		);
+		return c.json(r.data, 201);
+	},
+);
+
+// 並び替え
+// PUT /me/queue
+nowPlaying.put(
+	'/me/queue',
+	requireStreamer,
+	zValidator('json', queueReorderSchema),
+	async (c) => {
+		const { rev, ids } = c.req.valid('json');
+		const r = await callDO(
+			c.env,
+			c.get('session').streamerId,
+			'/queue/reorder',
+			{ rev, ids },
+			[200, 400, 409],
+		);
+		return c.json(r.data, r.status as 200 | 400 | 409);
+	},
+);
+
+// 1曲外す
+// DELETE /me/queue/:id
+nowPlaying.delete('/me/queue/:id', requireStreamer, async (c) => {
+	const r = await callDO(
+		c.env,
+		c.get('session').streamerId,
+		'/queue/remove',
+		{ id: c.req.param('id') },
+		[200, 404],
+	);
+	return c.json(r.data, r.status as 200 | 404);
+});
+
+// 次の曲にする
+// POST /me/queue/next
+nowPlaying.post('/me/queue/next', requireStreamer, async (c) => {
+	const r = await callDO(
+		c.env,
+		c.get('session').streamerId,
+		'/queue/next',
+		{},
+		[200, 409],
+	);
+	return c.json(r.data, r.status as 200 | 409);
 });
 
 // オーバーレイの鍵
@@ -341,7 +591,7 @@ nowPlaying.get('/overlay/now-playing', async (c) => {
 	if (!streamerId) return c.json({ error: 'not found' }, 404);
 	const r = await callDO(c.env, streamerId, '/get');
 	c.header('cache-control', 'no-store');
-	return c.json(r);
+	return c.json(r.data);
 });
 
 // helper関数
@@ -350,6 +600,12 @@ function json(o: unknown, status = 200): Response {
 		status,
 		headers: { 'content-type': 'application/json; charset=UTF-8' },
 	});
+}
+
+function randomId(): string {
+	const b = new Uint8Array(8);
+	crypto.getRandomValues(b);
+	return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
 
 function randomKey(): string {
