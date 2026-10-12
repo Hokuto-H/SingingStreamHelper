@@ -330,6 +330,10 @@ const ROUTES = [
   // OBS に貼る 2 枚の HTML。JSON ではないので下の判定を通さない
   ["GET", "/dock"],
   ["GET", "/overlay"],
+  ["GET", "/overlay?theme=card"],
+  ["GET", "/overlay?bare=1"],
+  // 見た目を作り込むための確認ページ。鍵も DB も使わない
+  ["GET", "/overlay/preview"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000/repertoire"],
   ["GET", "/public/streamers/01a00000-0000-7000-8000-000000000000/history"],
@@ -367,7 +371,8 @@ for (const [method, path] of ROUTES) {
   }
   // ★ /dock と /overlay は HTML を返すので、JSON でないのが正しい。
   //   「JSON じゃない = ルートが無い」の判定から外す。
-  const isHtmlRoute = path === "/dock" || path === "/overlay";
+  const isHtmlRoute = path === "/dock" || path.startsWith("/overlay?")
+    || path === "/overlay" || path === "/overlay/preview";
   const missing = res.status === 404 && !isJson && !isHtmlRoute;
 
   let note = `→ ${res.status}`;

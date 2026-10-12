@@ -565,12 +565,49 @@ r = await call("POST", "/me/now-playing", { body: { title: "x" } });
 check("トークン無しは 401", r.status === 401, `status=${r.status}`);
 
 // ── OBS に貼る 2 枚 ────────────────────────────────
-for (const path of ["/dock", "/overlay"]) {
+// ★ テーマはサーバ側で差し込むので、ここで «実際に CSS が変わるか» を見る。
+//   DOM に data-theme を持たせる実装に戻すと特異度が上がって
+//   配信者の CSS が効かなくなるので、それを起こさないための歯止め。
+for (const [q, want] of [
+  ["", ".np-title { font-size: 34px"],
+  ["&theme=card", "background: rgba(18,20,26,.72)"],
+  ["&theme=minimal", '.np-title::before { content: "♪ "'],
+  ["&bare=1", null],
+]) {
+  const res2 = await fetch(`${BASE}/overlay?key=x${q}`);
+  const html = await res2.text();
+  if (want) {
+    check(`GET /overlay${q || " (既定)"} に既定 CSS が入る`, html.includes(want), want.slice(0, 40));
+  } else {
+    check("GET /overlay&bare=1 は既定 CSS を含まない",
+      !html.includes(".np-title { font-size") && html.includes(".np-title"),
+      "DOM は残り、見た目の CSS だけ落ちる");
+  }
+  check(`  ${q || "(既定)"} に ID セレクタが無い`, !/#np|#title|#sub/.test(html));
+}
+
+for (const path of ["/dock", "/overlay", "/overlay/preview"]) {
   const res = await fetch(BASE + path);
   const body = await res.text();
   check(`GET ${path} が HTML を返す`,
     res.status === 200 && body.startsWith("<!doctype html>"),
     `status=${res.status} ${body.length} バイト`);
+}
+
+// ── 確認ページ (/overlay/preview) ──────────────────
+// ★ プレビューは **同一オリジンの iframe** に /overlay?demo=1 を読み込んで
+//   CSS を注入する。別オリジンに置くと contentDocument に触れず何も映らない。
+//   ここが壊れると「CSS を書いても反映されない」としか見えないので固定しておく。
+{
+  const html = await (await fetch(`${BASE}/overlay/preview`)).text();
+  check("確認ページが /overlay?demo=1 を読み込む", html.includes('"/overlay?demo=1&"'));
+  check("確認ページは鍵を要求しない（認証なしで開ける）", html.includes("プレビューは鍵を使いません"));
+
+  // demo=1 側: WebSocket を開かず postMessage を待つ分岐があること
+  const ov = await (await fetch(`${BASE}/overlay?demo=1`)).text();
+  check("demo=1 の分岐がオーバーレイにある", ov.includes('q.get("demo") === "1"'));
+  check("demo は同一オリジンのメッセージしか受けない",
+    ov.includes("ev.origin !== location.origin"));
 }
 
 // =====================================================================
@@ -762,6 +799,10 @@ console.log(
     `\n\n 動作確認用 (接続状態と現在の曲を表示):` +
     `\n   ${BASE}/overlay?key=${rotated}&debug=1` +
     "\n   ★ こちらは OBS には貼らないでください。" +
+    `\n\n ★ 見た目を作り込むならこちら (鍵も曲も要りません):` +
+    `\n   ${BASE}/overlay/preview` +
+    "\n     曲名を打ち替えながらカスタムCSS を試せます。" +
+    "\n     ここで書いた CSS をそのまま OBS の「カスタムCSS」に貼れます。" +
     `\n\n ドック: ${BASE}/dock` +
     "\n\n 表示を消すには DELETE /me/now-playing を叩いてください。" +
     "\n─────────────────────────────────────────────",

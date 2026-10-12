@@ -64,10 +64,16 @@ const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.use('*', cors);
 app.use('*', rateLimit);
 
+const NO_DB_PATHS = new Set([
+	'/health',
+	'/dock',
+	'/overlay',
+	'/overlay/preview',
+]);
+
 app.use('*', async (c, next) => {
-	if (!c.get('db')) {
-		const client = db(c.env);
-		c.set('db', client);
+	if (!NO_DB_PATHS.has(new URL(c.req.url).pathname)) {
+		c.set('db', db(c.env));
 	}
 	await next();
 });
