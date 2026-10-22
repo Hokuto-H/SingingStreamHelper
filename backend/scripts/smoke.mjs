@@ -86,6 +86,12 @@ async function call(method, path, { token, body } = {}) {
 section("1. 認証が要らないところ");
 
 const stamp = Date.now();
+// ★ readingTitle はひらがな・長音・中黒・空白しか受け付けない (HIRAGANA_ONLY)。
+//   登録ゲートが見るのは**読み**なので、読みを毎回同じにすると
+//   2 回目の smoke から「似た曲がある」で 409 になって止まる。
+//   数字をひらがなに写して、読みも毎回別物にしておく。
+const kanaStamp = String(stamp).replace(/\d/g, (d) => "あいうえおかきくけこ"[d]);
+
 let r = await call("GET", "/health");
 check("GET /health が 200", r.status === 200 && r.body?.ok === true, short(r.body));
 
@@ -193,11 +199,16 @@ if (!token) {
 
 section("3. 曲マスタ");
 
-r = await call("POST", "/songs", {
+// ★ force=1 を付けている理由
+//   smoke は毎回ほぼ同じ曲を登録する。登録ゲートから見ると
+//   「前回の実行で入れた曲とそっくり」なので、素のままだと 409 になる。
+//   ここで試したいのは登録そのものであってゲートではない (ゲートは第 12 段)。
+//   読みにも kanaStamp を足して、マスタに同じ読みを量産しないようにしてある。
+r = await call("POST", "/songs?force=1", {
   token,
   body: [
-    { title: `テスト曲${stamp}`, readingTitle: "てすときょく", artist: "テスト歌手" },
-    { title: `夜に駆ける${stamp}`, readingTitle: "よるにかける", artist: "YOASOBI" },
+    { title: `テスト曲${stamp}`, readingTitle: `てすときょく${kanaStamp}`, artist: "テスト歌手" },
+    { title: `夜に駆ける${stamp}`, readingTitle: `よるにかける${kanaStamp}`, artist: "YOASOBI" },
   ],
 });
 check("POST /songs で登録できる", r.status === 201 || r.status === 200, `status=${r.status} ${short(r.body)}`);
@@ -327,6 +338,8 @@ check("履歴を読める", r.status === 200 && (r.body?.items?.length ?? 0) > 0
       ? "  ★シリアル値のままです。K1 の数式を TEXT() 版に貼り替えてください" : ""));
   check("累計回数が数えられている", typeof it?.singCount === "number", String(it?.singCount));
 }
+// ★ pending は「曲は決まっているが Sheets に書けていない」もの。
+//   「どの曲か決まっていない」確認待ちは unresolved に分けてある (第 12 段で見る)。
 check("未同期は残っていない", (r.body?.pending?.length ?? 0) === 0,
   `pending=${r.body?.pending?.length}`);
 const h = r.body?.items?.find((x) => x.streamUrl);
@@ -583,7 +596,7 @@ for (const [q, want] of [
       !html.includes(".np-title { font-size") && html.includes(".np-title"),
       "DOM は残り、見た目の CSS だけ落ちる");
   }
-  check(`  ${q || "(既定)"} に ID セレクタが無い`, !/#np|#title|#sub/.test(html));
+  check(`  ${q || "(既定)"} に ID セレクタが無い`, !/#np|#title|#sub/.test(html));
 }
 
 for (const path of ["/dock", "/overlay", "/overlay/preview"]) {
@@ -780,6 +793,144 @@ if (firstOrigin && !/^https?:\/\//.test(firstOrigin)) {
   await call("PATCH", "/me", { token, body: { isPublic: false } });
 }
 
+// =====================================================================
+// 第 12 段: 曲マスタの登録ゲート
+// =====================================================================
+//
+// ★ (title_key, artist_key) のユニーク制約は**完全一致しか見ない**。
+//   漢字↔かな、1 文字の入れ替わり、表記系の違いは素通りして、
+//   同じ曲が別の ID に分裂する。分裂すると Repertoire の
+//   「累計回数」「最終歌唱日」が songId 突き合わせの都合でばらける。
+//
+// ★ この段は曲マスタに曲を作る。本番に対して走らせると残るので、
+//   曲名を "__smoke-" で始めてある。後からまとめて拾える。
+//
+// ★ revoke-docks より**前**に置くこと。第 12-b 段が pairedToken を使う。
+
+section("12. 曲マスタの登録ゲート");
+
+const gBase = `__smoke-夜に駆ける-${stamp}`;
+const gYomi = `よるにかける`;
+const gArtist = `__smokeYOASOBI${stamp}`;
+
+// ① 下地。force を付けて確実に通す
+r = await call("POST", "/songs?force=1", {
+  token,
+  body: { title: gBase, readingTitle: gYomi, artist: gArtist },
+});
+check("下地の曲を登録できる", r.status === 201, `status=${r.status} ${short(r.body)}`);
+const gId = r.body?.created?.[0]?.id;
+check("曲 ID が返る", typeof gId === "string" && gId.length > 0, String(gId));
+
+// ② 完全一致は今までどおり (ゲートではなくユニーク制約で弾かれる)
+r = await call("POST", "/songs?onDuplicate=skip", {
+  token,
+  body: { title: gBase, readingTitle: gYomi, artist: gArtist },
+});
+check("完全一致は skipped に入る",
+  r.status === 200 && r.body?.skipped?.[0]?.existingId === gId, short(r.body));
+
+// ③ ★ 漢字→ひらがな。正規化キーは別物なので、読みで捕まえる
+const gKana = gBase.replace("夜に駆ける", "夜にかける");
+r = await call("POST", "/songs", {
+  token,
+  body: { title: gKana, readingTitle: gYomi, artist: gArtist },
+});
+check("★漢字→かな の打ち間違いを 409 で止める",
+  r.status === 409 && r.body?.error === "similar song exists",
+  `status=${r.status} ${short(r.body)}`);
+check("  候補に元の曲が入っている",
+  (r.body?.similar?.[0]?.candidates ?? []).some((c) => c.id === gId),
+  JSON.stringify((r.body?.similar?.[0]?.candidates ?? []).map((c) => c.reason)));
+
+// ④ ★ 歌手名の 1 文字入れ替え (YOASOBI / YAOSOBI)
+r = await call("POST", "/songs", {
+  token,
+  body: { title: gBase, readingTitle: gYomi, artist: gArtist.replace("YOASOBI", "YAOSOBI") },
+});
+check("★歌手名の入れ替わりを 409 で止める", r.status === 409, `status=${r.status}`);
+
+// ⑤ 人が「別の曲です」を押した場合だけ越えられる
+r = await call("POST", "/songs?force=1", {
+  token,
+  body: { title: gKana, readingTitle: gYomi, artist: gArtist },
+});
+check("force=1 なら越えられる", r.status === 201, `status=${r.status} ${short(r.body)}`);
+
+// ⑥ 本当に別の曲は素通りする (誤爆していないこと)
+r = await call("POST", "/songs", {
+  token,
+  body: {
+    title: `__smoke-まったく別の曲-${stamp}`,
+    readingTitle: `まったくべつのきょく${kanaStamp}`,
+    artist: `__smoke別歌手${stamp}`,
+  },
+});
+check("無関係な曲は止めない (誤爆していない)", r.status === 201,
+  `status=${r.status} ${short(r.body)}`);
+
+// =====================================================================
+// 第 12-b 段: 確認待ちの歌唱記録
+// =====================================================================
+//
+// ★ マスタに無い曲を歌っても**記録を失わない**ことを固定する。
+//   配信中にリクエストで未登録の曲を歌うのは普通に起きる。
+//   そこで 400 にすると、その歌唱はどこにも残らない。
+
+section("12-b. 確認待ちの歌唱記録");
+
+const gCid = `smoke-${stamp}-pending`;
+const gUnknown = `__smoke-マスタに無い曲-${stamp}`;
+
+// ⑦ ★ songId なしで歌唱記録を受ける
+r = await call("POST", "/me/performances", {
+  token,
+  body: [{ title: gUnknown, sungAt: new Date().toISOString(), clientId: gCid }],
+});
+check("★songId が無くても 201 で受ける", r.status === 201, `status=${r.status} ${short(r.body)}`);
+check("★pending に入る (記録は失われない)",
+  r.body?.pending?.length === 1 && r.body.pending[0].clientId === gCid,
+  JSON.stringify(r.body?.pending?.map((p) => p.title)));
+check("  確認待ちは Sheets に書かれない", (r.body?.created?.length ?? 0) === 0);
+
+// ⑧ 同じ clientId での再送は二重にならない
+r = await call("POST", "/me/performances", {
+  token,
+  body: [{ title: gUnknown, sungAt: new Date().toISOString(), clientId: gCid }],
+});
+check("同じ clientId の再送は duplicated", r.body?.duplicated?.length === 1, short(r.body));
+
+// ⑨ ★ 曲名がマスタにちょうど 1 件あれば、その場で結び付く
+r = await call("POST", "/me/performances", {
+  token,
+  body: [{
+    title: gBase, artist: gArtist,
+    sungAt: new Date().toISOString(), clientId: `smoke-${stamp}-resolve`,
+  }],
+});
+check("★曲名から自動でひも付く",
+  r.status === 201 && r.body?.created?.[0]?.songId === gId,
+  `created=${JSON.stringify(r.body?.created?.map((c) => c.songId))} pending=${r.body?.pending?.length}`);
+
+// ⑩ ★ 確認待ちは unresolved として読める (pending = Sheets 未反映 とは別物)
+r = await call("GET", "/me/performances?limit=5", { token });
+check("★確認待ちが unresolved に並ぶ",
+  (r.body?.unresolved ?? []).some((u) => u.title === gUnknown),
+  `unresolved=${r.body?.unresolved?.length} pending=${r.body?.pending?.length}`);
+check("★Sheets 未反映 (pending) とは混ざっていない",
+  (r.body?.pending ?? []).every((p) => p.songId && p.songId !== "null"),
+  JSON.stringify((r.body?.pending ?? []).map((p) => p.songId).slice(0, 3)));
+
+// ⑪ 入力チェック
+r = await call("POST", "/me/performances", {
+  token,
+  body: [{ title: gBase, sungAt: "2026-10-19T23:50:00+09:00", clientId: `smoke-${stamp}-tz` }],
+});
+check("★sungAt の +09:00 は 400 (Z 形式で送ること)", r.status === 400, `status=${r.status}`);
+
+r = await call("POST", "/me/performances", { token, body: [{ clientId: `smoke-${stamp}-empty` }] });
+check("songId も title も無いものは 400", r.status === 400, `status=${r.status}`);
+
 // 後片付け: ペアリングで出たトークンと、上で作った dock トークンを失効させる
 await call("POST", "/me/tokens/revoke-docks", { token });
 console.log("\n(後片付け: ペアリングで発行したドック用トークンを失効させました)");
@@ -805,6 +956,8 @@ console.log(
     "\n     ここで書いた CSS をそのまま OBS の「カスタムCSS」に貼れます。" +
     `\n\n ドック: ${BASE}/dock` +
     "\n\n 表示を消すには DELETE /me/now-playing を叩いてください。" +
+    `\n\n ★ 第 12 段が作った曲は曲名が "__smoke-" で始まります。` +
+    "\n   確認待ちの記録も 1 件残ります。本番に対して走らせた場合は後で片付けてください。" +
     "\n─────────────────────────────────────────────",
 );
 

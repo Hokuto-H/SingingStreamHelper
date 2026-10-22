@@ -12,6 +12,7 @@ import {
 	searchHot,
 	type Snapshot,
 } from './hotIndex';
+import { findDuplicateCandidates, gateNote } from './song-gate';
 import { type BuiltQuery, buildSearchQuery, cacheKeyOf } from './search';
 import {
 	type Song,
@@ -130,7 +131,7 @@ app.post(
 	zValidator('json', createSongsSchema, onInvalid),
 	async (c) => {
 		// 曲をマスターDBに登録する
-		const { onDuplicate } = c.req.valid('query');
+		const { onDuplicate, force } = c.req.valid('query');
 		const input = c.req.valid('json');
 		const conn = c.get('db');
 
@@ -195,6 +196,33 @@ app.post(
 		}
 		if (fresh.length === 0) {
 			return c.json({ created: [], skipped }, 200);
+		}
+
+		// 登録ゲート
+		if (!force) {
+			const hot = c.env.HOT ? await loadHotIndex(c.env.HOT) : null;
+			const similar = await findDuplicateCandidates(conn, fresh, hot);
+			if (similar.size > 0) {
+				return c.json(
+					{
+						error: 'similar song exists',
+						message:
+							'似た曲がすでに登録されています。内容を確かめ、別の曲であれば force=1 をつけて送り直してください。',
+						note: gateNote(hot),
+						similar: [...similar.entries()].map(
+							([i, candidates]) => ({
+								input: {
+									title: fresh[i].title,
+									artist: fresh[i].artist,
+									readingTitle: fresh[i].readingTitle,
+								},
+								candidates,
+							}),
+						),
+					},
+					409,
+				);
+			}
 		}
 
 		// 登録処理
