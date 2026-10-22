@@ -272,18 +272,25 @@ export const issueTokenSchema = z.object({
 });
 
 // POST /me/performance (歌唱記録) で使用
-export const performanceInputSchema = z.object({
-	songId: z.string().trim().min(1).max(64), // マスターDBの曲ID
-	sungAt: z.iso.datetime().optional(), // 歌った時刻(ISO8601)
-	streamUrl: z.url().trim().max(500).optional(), // 視聴者に見せる配信URL
-	timestampSec: z
-		.number()
-		.int()
-		.min(0)
-		.max(86400 * 7)
-		.optional(), // 配信開始からの秒数
-	clientId: z.string().trim().min(8).max(64).optional(),
-});
+export const performanceInputSchema = z
+	.object({
+		songId: z.string().trim().min(1).max(64).optional(), // マスターDBの曲ID
+		title: z.string().trim().min(1).max(200).optional(), // songIdが無いときの手がかり
+		artist: z.string().trim().max(200).optional(),
+		sungAt: z.iso.datetime().optional(), // 歌った時刻(ISO8601)
+		streamUrl: z.url().trim().max(500).optional(), // 視聴者に見せる配信URL
+		timestampSec: z
+			.number()
+			.int()
+			.min(0)
+			.max(86400 * 7)
+			.optional(), // 配信開始からの秒数
+		clientId: z.string().trim().min(8).max(64).optional(),
+	})
+	.refine((v) => v.songId !== undefined || v.title !== undefined, {
+		message: 'songId または title のどちらかは必要です。',
+		path: ['songId'],
+	});
 
 export const createPerformancesSchema = z
 	.union([

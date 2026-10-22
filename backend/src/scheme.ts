@@ -121,6 +121,14 @@ export const createQuerySchema = z.object({
 		emptyToUndefined,
 		z.enum(['error', 'skip']).default('error'),
 	),
+
+	force: z.preprocess(
+		(v) =>
+			v === '' || v === undefined
+				? false
+				: v === '1' || v === 'true' || v === true,
+		z.boolean().default(false),
+	),
 });
 
 export type CreateQuery = z.infer<typeof createQuerySchema>;

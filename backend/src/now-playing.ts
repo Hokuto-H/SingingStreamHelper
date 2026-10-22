@@ -190,7 +190,7 @@ export class NowPlayingDO {
 		}
 	}
 
-	async wwebSocketClose(
+	async webSocketClose(
 		ws: WebSocket,
 		code: number,
 		reason: string,

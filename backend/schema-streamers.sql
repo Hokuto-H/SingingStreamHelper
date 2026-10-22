@@ -39,16 +39,20 @@ CREATE INDEX IF NOT EXISTS idx_streamer_tokens_owner ON streamer_tokens (streame
 CREATE TABLE IF NOT EXISTS performances (
     id              TEXT    NOT NULL PRIMARY KEY, -- UUIDv7
     streamer_id     TEXT    NOT NULL REFERENCES streamers(id) ON DELETE CASCADE,
-    song_id         TEXT    NOT NULL,
+    song_id         TEXT,
+    title_text      TEXT,
+    artist_text     TEXT,
     sung_at         INTEGER NOT NULL,
     stream_url      TEXT,
     timestamp_sec   INTEGER,
     client_id       TEXT,
     synced_at       INTEGER,
-    created_at      INTEGER NOT NULL
+    created_at      INTEGER NOT NULL,
+    CHECK (song_id IS NOT NULL OR title_text IS NOT NULL)
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS idx_performances_unsynced ON performances (streamer_id, created_at) WHERE synced_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_performances_unsynced ON performances (streamer_id, created_at) WHERE synced_at IS NULL AND song_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_performances_pending ON performances (streamer_id, sung_at) WHERE song_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_performances_client ON performances (streamer_id, client_id) WHERE client_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_performances_purge ON performances (synced_at) WHERE synced_at IS NOT NULL;
 

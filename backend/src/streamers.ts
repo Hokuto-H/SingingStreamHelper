@@ -5,6 +5,7 @@ import { v7 as uuidv7 } from 'uuid';
 import type { Client } from '@libsql/client/web';
 
 import { bearerFrom, issueToken } from './auth';
+import { normalizeKey } from './keys';
 import {
 	parseHistoryRows,
 	parseRepertoireRows,
@@ -641,42 +642,113 @@ streamers.post(
 		const db = c.get('db');
 		const now = Date.now();
 
-		const songIds = [...new Set(items.map((i) => i.songId))];
-		const songsRs = await db.execute({
-			sql: `SELECT id, title FROM songs WHERE id IN (${songIds.map(() => '?').join('. ')})`,
-			args: songIds,
-		});
-		const songs = new Map(
-			(songsRs.rows as unknown as Record<string, string>[]).map((r) => [
-				String(r.id),
-				String(r.title),
-			]),
-		);
-		const missing = songIds.filter((id) => !songs.has(id));
-		if (missing.length > 0) {
-			return c.json(
-				{
-					error: 'unknown songId',
-					message: '曲が見つかりません。',
-					missing,
-				},
-				400,
-			);
+		const songIds = [
+			...new Set(
+				items.map((i) => i.songId).filter((x): x is string => !!x),
+			),
+		];
+		const songs = new Map<string, string>();
+		if (songIds.length > 0) {
+			const songsRs = await db.execute({
+				sql: `SELECT id, title FROM songs WHERE id IN (${songIds.map(() => '?').join(', ')})`,
+				args: songIds,
+			});
+			for (const r of songsRs.rows as unknown as Record<
+				string,
+				string
+			>[]) {
+				songs.set(String(r.id), String(r.title));
+			}
+			const missing = songIds.filter((id) => !songs.has(id));
+			if (missing.length > 0) {
+				return c.json(
+					{
+						error: 'unknown songId',
+						message: '曲が見つかりません。',
+						missing,
+					},
+					400,
+				);
+			}
+		}
+
+		const unresolved = items
+			.map((i, idx) => ({ i, idx }))
+			.filter(({ i }) => !i.songId && i.title);
+		const resolved = new Map<number, { id: string; title: string }>();
+		if (unresolved.length > 0) {
+			const keys = [
+				...new Set(
+					unresolved
+						.map(({ i }) => normalizeKey(i.title!))
+						.filter(Boolean),
+				),
+			];
+			if (keys.length > 0) {
+				const ph = keys.map(() => '?').join(', ');
+				const rs = await db.execute({
+					sql: `SELECT id, title, title_key, reading_key, artist_key FROM songs WHERE title_key IN (${ph}) OR reading_key IN (${ph})`,
+					args: [...keys, ...keys],
+				});
+				const byKey = new Map<string, Record<string, string>[]>();
+				for (const r of rs.rows as unknown as Record<
+					string,
+					string
+				>[]) {
+					for (const k of [
+						String(r.title_key),
+						String(r.reading_key),
+					]) {
+						const list = byKey.get(k);
+						if (list) list.push(r);
+						else byKey.set(k, [r]);
+					}
+				}
+				for (const { i, idx } of unresolved) {
+					const hits = byKey.get(normalizeKey(i.title!)) ?? [];
+					const narrowed = i.artist
+						? hits.filter(
+								(r) =>
+									String(r.artist_key) ===
+									normalizeKey(i.artist!),
+							)
+						: hits;
+					const uniqById = new Map(
+						narrowed.map((r) => [String(r.id), r]),
+					);
+					if (uniqById.size === 1) {
+						const r = [...uniqById.values()][0];
+						resolved.set(idx, {
+							id: String(r.id),
+							title: String(r.title),
+						});
+						songs.set(String(r.id), String(r.title));
+					}
+				}
+			}
 		}
 
 		// performancesに記録
-		const prepared = items.map((i) => ({
-			...i,
-			id: uuidv7(),
-			sungAtMs: i.sungAt ? Date.parse(i.sungAt) : now,
-		}));
+		const prepared = items.map((i, idx) => {
+			const songId = i.songId ?? resolved.get(idx)?.id ?? null;
+			return {
+				...i,
+				id: uuidv7(),
+				songId,
+				titleText: songId ? null : (i.title ?? null),
+				artistText: songId ? null : (i.artist ?? null),
+				sungAtMs: i.sungAt ? Date.parse(i.sungAt) : now,
+			};
+		});
 		const results = await db.batch(
 			prepared.map((p) => ({
-				sql: `INSERT INTO performances (id, streamer_id, song_id, sung_at, stream_url, timestamp_sec, client_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (streamer_id, client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id`,
+				sql: `INSERT INTO performances (id, streamer_id, song_id, title_text, artist_text, sung_at, stream_url, timestamp_sec, client_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (streamer_id, client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id`,
 				args: [
 					p.id,
 					s.streamerId,
 					p.songId,
+					p.titleText,
+					p.artistText,
 					p.sungAtMs,
 					p.streamUrl ?? null,
 					p.timestampSec ?? null,
@@ -692,16 +764,21 @@ streamers.post(
 			(_, i) => results[i].rows.length === 0,
 		);
 
+		const toSheet = accepted.filter(
+			(p): p is typeof p & { songId: string } => p.songId !== null,
+		);
+		const pendingRows = accepted.filter((p) => p.songId === null);
+
 		// スプレッドシートに追記
 		let synced = false;
-		if (accepted.length > 0) {
+		if (toSheet.length > 0) {
 			try {
 				await appendRows(
 					c.env,
 					s.spreadsheetId,
 					s.historySheet,
 					HISTORY_WRITE_RANGE,
-					accepted.map((p) => [
+					toSheet.map((p) => [
 						escapeSheetText(p.songId),
 						formatSheetDateTime(p.sungAtMs, s.timezone),
 						escapeSheetText(songs.get(p.songId)!),
@@ -711,8 +788,8 @@ streamers.post(
 				);
 				synced = true;
 				await db.execute({
-					sql: `UPDATE performances SET synced_at = ? WHERE id IN (${accepted.map(() => '?').join(', ')})`,
-					args: [Date.now(), ...accepted.map((p) => p.id)],
+					sql: `UPDATE performances SET synced_at = ? WHERE id IN (${toSheet.map(() => '?').join(', ')})`,
+					args: [Date.now(), ...toSheet.map((p) => p.id)],
 				});
 			} catch {
 				// synced: false
@@ -721,11 +798,20 @@ streamers.post(
 
 		return c.json(
 			{
-				created: accepted.map((p) => ({
+				created: toSheet.map((p) => ({
 					id: p.id,
 					songId: p.songId,
 					sungAt: new Date(p.sungAtMs).toISOString(),
 					clientId: p.clientId ?? null,
+					resolved: !p.songId || !!resolved.get(prepared.indexOf(p)),
+				})),
+				pending: pendingRows.map((p) => ({
+					id: p.id,
+					title: p.titleText,
+					artist: p.artistText,
+					sungAt: new Date(p.sungAtMs).toISOString(),
+					clientId: p.clientId ?? null,
+					reason: `曲マスタに見つからないため、確認待ちにしました。`,
 				})),
 				duplicated: duplicated.map((p) => ({
 					songId: p.songId,
@@ -768,10 +854,17 @@ streamers.get(
 
 		const items = parseHistoryRows(values, limit);
 
-		const pendingRs = await c.get('db').execute({
-			sql: `SELECT id, song_id, sung_at, stream_url, timestamp_sec FROM performances WHERE streamer_id = ? AND synced_at IS NULL ORDER BY created_at DESC LIMIT 100`,
-			args: [s.streamerId],
-		});
+		const db = c.get('db');
+		const [pendingRs, unresolvedRs] = await Promise.all([
+			db.execute({
+				sql: `SELECT id, song_id, sung_at, stream_url, timestamp_sec FROM performances WHERE streamer_id = ? AND synced_at IS NULL AND song_id IS NOT NULL ORDER BY created_at DESC LIMIT 100`,
+				args: [s.streamerId],
+			}),
+			db.execute({
+				sql: `SELECT id, title_text, artist_text, sung_at FROM performances WHERE streamer_id = ? AND song_id IS NULL ORDER BY sung_at DESC LIMIT 200`,
+				args: [s.streamerId],
+			}),
+		]);
 
 		return c.json({
 			items,
@@ -788,6 +881,17 @@ streamers.get(
 				streamUrl: r.stream_url === null ? null : String(r.stream_url),
 				timestampSec:
 					r.timestamp_sec === null ? null : Number(r.timestamp_sec),
+			})),
+			unresolved: (
+				unresolvedRs.rows as unknown as Record<
+					string,
+					string | number | null
+				>[]
+			).map((r) => ({
+				id: String(r.id),
+				title: r.title_text === null ? null : String(r.title_text),
+				artist: r.artist_text === null ? null : String(r.artist_text),
+				sungAt: new Date(Number(r.sung_at)).toISOString(),
 			})),
 		});
 	},
@@ -1011,7 +1115,7 @@ streamers.post('/me/resync', requireStreamer, async (c) => {
 		sql: `SELECT p.id, p.song_id, p.sung_at, p.stream_url, p.timestamp_sec, s.title
 			FROM performances p
 			LEFT JOIN songs s ON s.id = p.song_id
-			WHERE p.streamer_id = ? AND p.synced_at IS NULL
+			WHERE p.streamer_id = ? AND p.synced_at IS NULL AND p.song_id IS NOT NULL
 			ORDER BY p.created_at
 			LIMIT 500`,
 		args: [s.streamerId],
